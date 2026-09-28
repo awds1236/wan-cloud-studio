@@ -1,0 +1,5 @@
+**
+!worker/
+!worker/Dockerfile
+!worker/handler.py
+!worker/requirements.txt
