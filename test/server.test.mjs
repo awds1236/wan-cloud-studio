@@ -38,3 +38,11 @@ test('provider failure returns actionable error without provider secrets',async 
   assert.equal(response.status,502);
   assert.match((await response.json()).error,/401/);
 });
+test('local mode accepts tiny job without cloud credentials or requests',async t=>{
+  let submitted;
+  const url=await setup(t,{request:()=>{throw Error('Cloud must not be called');},local:{ready:()=>true,submit:async input=>{submitted=input;return {id:'local-1',status:'IN_PROGRESS'};},status:()=>({id:'local-1',status:'COMPLETED',output:{video_url:'/outputs/local-1.mp4'}}),cancel:()=>({status:'CANCELLED'})}});
+  assert.deepEqual(await (await fetch(url+'/api/config')).json(),{configured:true,mode:'local'});
+  const response=await fetch(url+'/api/jobs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt:'A forest',preset:'tiny',seed:42})});
+  assert.equal(response.status,200);assert.equal(submitted.preset,'tiny');
+  assert.equal((await (await fetch(url+'/api/jobs/local-1')).json()).status,'COMPLETED');
+});

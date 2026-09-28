@@ -2,9 +2,10 @@ import http from 'node:http';
 import {readFile} from 'node:fs/promises';
 import {fileURLToPath} from 'node:url';
 import {validate} from './validation.mjs';
+import {createLocalJobs} from './local/jobs.mjs';
 
-export function createApp({key='', endpoint='', request=fetch}={}) {
-  const configured = Boolean(key && /^[a-zA-Z0-9_-]+$/.test(endpoint));
+export function createApp({key='', endpoint='', request=fetch, local=null}={}) {
+  const configured = local ? local.ready() : Boolean(key && /^[a-zA-Z0-9_-]+$/.test(endpoint));
   const jobs = new Set();
   async function upstream(path, body) {
     const response = await request(`https://api.runpod.ai/v2/${endpoint}/${path}`, {
@@ -24,19 +25,28 @@ export function createApp({key='', endpoint='', request=fetch}={}) {
         res.writeHead(200,{'Content-Type':'text/html; charset=utf-8','Cache-Control':'no-store','X-Content-Type-Options':'nosniff'});
         return res.end(await readFile(new URL('./public/index.html',import.meta.url)));
       }
-      if(req.method==='GET' && path==='/api/config') return send(200,{configured});
+      if(req.method==='GET' && path==='/api/config') return send(200,local ? {configured,mode:'local'} : {configured});
+      if(local && req.method==='GET' && /^\/outputs\/[a-f0-9-]+\.mp4$/.test(path)) {
+        try {const bytes=await readFile(new URL('.'+path,import.meta.url));res.writeHead(200,{'Content-Type':'video/mp4','Content-Length':bytes.length});return res.end(bytes);} catch {return send(404,{error:'영상 파일을 찾을 수 없습니다.'});}
+      }
+      if(local && !configured) return send(503,{error:'install-local.cmd를 먼저 실행하세요.'});
       if(!configured) return send(503,{error:'.env 파일에 Runpod API 키와 엔드포인트 ID를 설정하고 프로그램을 다시 실행하세요.'});
       if(req.method==='POST' && path==='/api/jobs') {
         if(!req.headers['content-type']?.startsWith('application/json')) return send(415,{error:'JSON 요청만 지원합니다.'});
         let body='';
         for await (const chunk of req) {body+=chunk; if(Buffer.byteLength(body)>16384) return send(413,{error:'입력이 너무 큽니다.'});}
         let input;
-        try {input=validate(JSON.parse(body));} catch(error) {return send(400,{error:error.message});}
+        try {input=validate(JSON.parse(body),Boolean(local));} catch(error) {return send(400,{error:error.message});}
+        if(local) return send(200,await local.submit(input));
         const result=await upstream('run',{input,policy:{executionTimeout:900000,ttl:3600000}});
         jobs.add(result.id);
         return send(200,result);
       }
       const match=path.match(/^\/api\/jobs\/([a-zA-Z0-9_-]+)(\/cancel)?$/);
+      if(local && match) {
+        const result=req.method==='POST' && match[2] ? local.cancel(match[1]) : req.method==='GET' && !match[2] ? local.status(match[1]) : null;
+        return send(result?200:404,result||{error:'로컬 작업을 찾을 수 없습니다.'});
+      }
       if(match && jobs.has(match[1])) {
         if(req.method==='GET' && !match[2]) return send(200,await upstream(`status/${match[1]}`));
         if(req.method==='POST' && match[2]) return send(200,await upstream(`cancel/${match[1]}`,{}));
@@ -47,5 +57,7 @@ export function createApp({key='', endpoint='', request=fetch}={}) {
 }
 if(process.argv[1] === fileURLToPath(import.meta.url)) {
   const port=Number(process.env.PORT || 8787);
-  createApp({key:process.env.RUNPOD_API_KEY,endpoint:process.env.RUNPOD_ENDPOINT_ID}).listen(port,'127.0.0.1',()=>console.log(`Wan Cloud Studio: http://127.0.0.1:${port}`));
+  const local=process.env.WAN_LOCAL==='1' ? createLocalJobs() : null;
+  for(const signal of ['SIGINT','SIGTERM'])process.on(signal,()=>{local?.stop();process.exit();});
+  createApp({key:process.env.RUNPOD_API_KEY,endpoint:process.env.RUNPOD_ENDPOINT_ID,local}).listen(port,'127.0.0.1',()=>console.log(`Wan ${local?'Local':'Cloud'} Studio: http://127.0.0.1:${port}`));
 }
